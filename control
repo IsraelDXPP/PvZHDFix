@@ -1,0 +1,12 @@
+Package: com.pvzhdfix.nocrash
+Name: PvZ HD No Crash
+Depends: mobilesubstrate (>= 0.9.5000)
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Prevents PvZ HD from crashing by blocking network checks.
+ All ad SDKs and reachability checks are hooked to return
+ "no connectivity" state, preventing crashes caused by
+ dead/offline servers.
+Maintainer: PvZHDFix
+Author: PvZHDFix
+Section: Tweaks

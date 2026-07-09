@@ -1,0 +1,91 @@
+name: Build PvZHDFix Modded IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: 'URL directa de descarga del IPA original (PvZ HD Free 2.4.0)'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: macos-13
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias Python
+        run: pip3 install lief
+
+      - name: Instalar ldid
+        run: brew install ldid
+
+      - name: Compilar insert_dylib
+        run: |
+          git clone --depth 1 https://github.com/Tyilo/insert_dylib /tmp/insert_dylib
+          cd /tmp/insert_dylib
+          xcodebuild -quiet -configuration Release 2>&1 | tail -5
+          sudo cp build/Release/insert_dylib /usr/local/bin/insert_dylib
+
+      - name: Descargar IPA original
+        run: |
+          curl -L "${{ github.event.inputs.ipa_url }}" -o input.ipa
+          echo "Tamaño: $(du -sh input.ipa | cut -f1)"
+
+      - name: Mostrar iOS SDK
+        id: sdk
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "path=$SDK" >> $GITHUB_OUTPUT
+          echo "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version) en $SDK"
+
+      - name: Compilar PvZHDFix.dylib (arm64 + armv7)
+        run: |
+          SDK="${{ steps.sdk.outputs.path }}"
+          xcrun clang \
+            -arch arm64 \
+            -arch armv7 \
+            -isysroot "$SDK" \
+            -dynamiclib \
+            -o PvZHDFix.dylib \
+            hooks/PvZHDFix.c \
+            hooks/fishhook.c \
+            -framework SystemConfiguration \
+            -framework Foundation \
+            -fobjc-arc \
+            -O2 \
+            -miphoneos-version-min=8.0 \
+            -install_name "@rpath/PvZHDFix.dylib" \
+            -Wno-deprecated-declarations
+          file PvZHDFix.dylib
+          lipo -info PvZHDFix.dylib
+
+      - name: Parchear e inyectar dylib en IPA
+        run: |
+          python3 patch_ipa.py input.ipa PvZHD_UnlockAll.ipa
+
+      - name: Verificar IPA
+        run: |
+          python3 -c "
+          import zipfile
+          with zipfile.ZipFile('PvZHD_UnlockAll.ipa') as z:
+              for n in z.namelist():
+                  b = n.split('/')[-1]
+                  if b == 'pvz' or 'PvZHDFix' in n or 'CodeSignature' in n:
+                      print(f'  {n}')
+          print('OK')
+          "
+
+      - name: Subir IPA como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: PvZHD_UnlockAll_Mod
+          path: PvZHD_UnlockAll.ipa
+          retention-days: 30
