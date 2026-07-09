@@ -74,9 +74,12 @@ jobs:
           ARC_DIR="/Applications/Xcode_15.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/arc"
           if [ ! -f "$ARC_DIR/libarclite_iphoneos.a" ]; then
             sudo mkdir -p "$ARC_DIR"
-            xcrun clang -c -x c -o /tmp/empty.o /dev/null
-            sudo ar rcs "$ARC_DIR/libarclite_iphoneos.a" /tmp/empty.o
-            echo "Created dummy libarclite_iphoneos.a"
+            for ARCH in arm64 armv7; do
+              xcrun -sdk iphoneos clang -arch $ARCH -c -x c -o /tmp/empty_$ARCH.o /dev/null
+            done
+            sudo lipo -create /tmp/empty_arm64.o /tmp/empty_armv7.o \
+              -output "$ARC_DIR/libarclite_iphoneos.a"
+            echo "Created dummy libarclite_iphoneos.a (arm64+armv7)"
           fi
 
       - name: Compilar PvZHDFix.dylib (arm64 + armv7)
