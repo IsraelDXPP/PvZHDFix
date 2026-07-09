@@ -123,9 +123,18 @@ jobs:
           EOF
           ls -lh PvZHD_UnlockAll.ipa
 
+      - name: Subir IPA como artefacto
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PvZHD_UnlockAll_Mod-${{ github.run_number }}
+          path: PvZHD_UnlockAll.ipa
+          retention-days: 30
+
       - name: Subir IPA como release asset
         uses: softprops/action-gh-release@v2
         if: github.event_name == 'push'
+        continue-on-error: true
         with:
           tag_name: "build-${{ github.run_number }}"
           name: "PvZHD UnlockAll Mod - Build ${{ github.run_number }}"
@@ -149,11 +158,3 @@ jobs:
           files: PvZHD_UnlockAll.ipa
           draft: false
           prerelease: false
-
-      - name: Subir IPA como artefacto (workflow_dispatch)
-        uses: actions/upload-artifact@v4
-        if: github.event_name == 'workflow_dispatch'
-        with:
-          name: PvZHD_UnlockAll_Mod
-          path: PvZHD_UnlockAll.ipa
-          retention-days: 30
