@@ -5,6 +5,7 @@
 //   2. 7 SCNetworkReachability hooks via fishhook -> bloquea ads/red
 //   3. NSURLConnection sync block
 //   4. applyUnlocks() en constructor -> desbloquea todo al lanzar
+//   5. Raw BL hook at pvz+0x1E4580 -> About button -> applyUnlocks + alert
 
 #include <stdio.h>
 #include <stdbool.h>
@@ -15,6 +16,9 @@
 #include <Foundation/Foundation.h>
 #include <UIKit/UIKit.h>
 #include <objc/runtime.h>
+#include <mach/mach.h>
+#include <mach-o/dyld.h>
+#include <libkern/OSCacheControl.h>
 #include "fishhook.h"
 
 
@@ -240,6 +244,126 @@ static void applyUnlocks(void) {
 
 
 // ============================================================
+// About button hook - replaces legal button with "Unlock All"
+// ============================================================
+
+static void hook_about_button(void) {
+    @autoreleasepool {
+        applyUnlocks();
+
+        UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Unlock All"
+                                                         message:@"All game modes and levels have been unlocked! Enjoy!"
+                                                        delegate:nil
+                                               cancelButtonTitle:@"OK"
+                                               otherButtonTitles:nil];
+        [alert show];
+    }
+}
+
+// Encode Thumb-2 BL T4 instruction
+static void encode_bl(uint16_t *out, uintptr_t src, uintptr_t dst) {
+    int32_t offset = (int32_t)(dst - (src + 4));
+    uint32_t u = (uint32_t)offset & 0x1FFFFFF;
+    uint8_t S = (u >> 24) & 1;
+    uint8_t I1 = (u >> 23) & 1;
+    uint8_t I2 = (u >> 22) & 1;
+    uint16_t imm10 = (u >> 12) & 0x3FF;
+    uint16_t imm11 = (u >> 1) & 0x7FF;
+    uint8_t J1 = 1 ^ (I1 ^ S);
+    uint8_t J2 = 1 ^ (I2 ^ S);
+    out[0] = 0xF000 | (S << 10) | imm10;
+    out[1] = (1 << 15) | (1 << 14) | (J1 << 13) | (1 << 12) | (J2 << 11) | imm11;
+}
+
+// Write trampoline: PUSH {R0, LR}; LDR R0, [PC, #0]; .word hook_fn; STR R0, [SP, #4]; POP {R0, PC}
+static void write_trampoline(uint16_t *tramp, uintptr_t hook_fn) {
+    tramp[0] = 0xB501;
+    tramp[1] = 0x4800;
+    *(uint32_t *)(tramp + 2) = (uint32_t)hook_fn;
+    tramp[4] = 0x9001;
+    tramp[5] = 0xBD01;
+}
+
+static void install_about_hook(void) {
+    uintptr_t pvz_base = (uintptr_t)_dyld_get_image_header(0);
+    uintptr_t hook_target = pvz_base + 0x1E4580;
+    uintptr_t hook_fn = (uintptr_t)&hook_about_button;
+
+    intptr_t bl_offset = (intptr_t)(hook_fn - (hook_target + 4));
+
+    if (bl_offset >= -16777216 && bl_offset <= 16777215) {
+        uint16_t bl[2];
+        encode_bl(bl, hook_target, hook_fn);
+
+        vm_address_t page = (vm_address_t)hook_target & ~0xFFF;
+        vm_protect(mach_task_self(), page, 0x1000, FALSE, VM_PROT_DEFAULT | VM_PROT_COPY);
+        memcpy((void *)hook_target, bl, 4);
+        vm_protect(mach_task_self(), page, 0x1000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+
+        sys_dcache_flush((void *)hook_target, 4);
+        sys_icache_invalidate((void *)hook_target, 4);
+
+        NSLog(@"[PvZHDFix] About button hook installed (direct BL, distance=%d)", (int)bl_offset);
+        return;
+    }
+
+    // Two-stage trampoline needed
+    vm_address_t tramp_addr = 0;
+    kern_return_t kr = vm_allocate(mach_task_self(), &tramp_addr, 0x1000, VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) {
+        NSLog(@"[PvZHDFix] Failed to allocate trampoline page: %d", kr);
+        return;
+    }
+
+    // Ensure trampoline is within 16MB of hook_target
+    intptr_t tramp_dist = (intptr_t)(tramp_addr - (hook_target + 4));
+    if (tramp_dist < -16777216 || tramp_dist > 16777215) {
+        // Try allocating near target
+        vm_deallocate(mach_task_self(), tramp_addr, 0x1000);
+        vm_address_t hint = (hook_target + 0x4000) & ~0xFFF;
+        for (int attempt = 0; attempt < 4; attempt++) {
+            hint += 0x10000 * (attempt % 2 == 0 ? 1 : -1);
+            if (hint < 0x10000) hint = 0x10000;
+            kr = vm_allocate(mach_task_self(), &hint, 0x1000, VM_FLAGS_FIXED);
+            if (kr == KERN_SUCCESS) {
+                intptr_t d = (intptr_t)(hint - (hook_target + 4));
+                if (d >= -16777216 && d <= 16777215) {
+                    tramp_addr = hint;
+                    break;
+                }
+                vm_deallocate(mach_task_self(), hint, 0x1000);
+            }
+        }
+        if (kr != KERN_SUCCESS) {
+            NSLog(@"[PvZHDFix] Could not allocate trampoline near target");
+            return;
+        }
+    }
+
+    // Make trampoline page writable and executable
+    vm_protect(mach_task_self(), tramp_addr, 0x1000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE | VM_PROT_WRITE);
+
+    write_trampoline((uint16_t *)tramp_addr, hook_fn);
+
+    sys_dcache_flush((void *)tramp_addr, 12);
+    sys_icache_invalidate((void *)tramp_addr, 12);
+
+    // Write BL at hook target to trampoline
+    uint16_t bl[2];
+    encode_bl(bl, hook_target, tramp_addr);
+
+    vm_address_t page = (vm_address_t)hook_target & ~0xFFF;
+    vm_protect(mach_task_self(), page, 0x1000, FALSE, VM_PROT_DEFAULT | VM_PROT_COPY);
+    memcpy((void *)hook_target, bl, 4);
+    vm_protect(mach_task_self(), page, 0x1000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+
+    sys_dcache_flush((void *)hook_target, 4);
+    sys_icache_invalidate((void *)hook_target, 4);
+
+    NSLog(@"[PvZHDFix] About button hook installed (via trampoline at 0x%x)", (unsigned int)tramp_addr);
+}
+
+// ============================================================
 // Constructor - runs when dylib is loaded
 // ============================================================
 __attribute__((constructor))
@@ -313,7 +437,10 @@ void PvZHDFix_Initialize(void) {
             method_setImplementation(m3, (IMP)hook_stringWithContentsOfFile_encoding_error);
         }
 
-        // 4. Auto-unlock al arrancar
+        // 4. Hook About button to "Unlock All"
+        install_about_hook();
+
+        // 5. Auto-unlock al arrancar
         applyUnlocks();
 
         if (result == 0) {
