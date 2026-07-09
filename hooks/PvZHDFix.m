@@ -292,18 +292,17 @@ static uintptr_t find_pattern_in_text(const uint8_t *pattern, size_t len) {
 
     uint32_t *cmds = (uint32_t *)header;
     uint32_t ncmds = cmds[4];
-
-    uintptr_t text_start = 0, text_size = 0;
     uintptr_t cmd_ptr = header + sizeof(struct mach_header);
+    uintptr_t text_start = 0, text_size = 0;
 
     for (uint32_t i = 0; i < ncmds; i++) {
         uint32_t cmd = *(uint32_t *)cmd_ptr;
         uint32_t cmdsize = *(uint32_t *)(cmd_ptr + 4);
-        if (cmd == 1) { // LC_SEGMENT (32-bit)
+        if (cmd == LC_SEGMENT) {
             uint8_t *seg = (uint8_t *)cmd_ptr;
             if (memcmp(seg + 8, "__TEXT\0\0\0\0\0\0\0\0\0\0", 16) == 0) {
-                text_start = *(uint32_t *)(seg + 0x1C) + header; // vmaddr + slide
-                text_size = *(uint32_t *)(seg + 0x20);
+                text_start = header;
+                text_size = *(uint32_t *)(seg + 0x1C);
                 break;
             }
         }
