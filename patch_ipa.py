@@ -199,9 +199,10 @@ def patch_macho(fat_binary, output_path, stubs_dict):
 
 def inject_dylib(app_dir, binary_path, dylib_src):
     """
-    Copies dylib to Frameworks/, adds @rpath/PvZHDFix.dylib LC_LOAD_DYLIB
-    and @executable_path/Frameworks rpath to the main binary.
+    Copies dylib to Frameworks/, adds @rpath LC_LOAD_DYLIB + rpath.
+    Uses macOS tools: lipo, install_name_tool, insert_dylib (avoids LIEF 0.14+ bugs).
     """
+    import subprocess, tempfile
     dylib_name = os.path.basename(dylib_src)
     frameworks_dir = os.path.join(app_dir, "Frameworks")
     os.makedirs(frameworks_dir, exist_ok=True)
@@ -209,44 +210,67 @@ def inject_dylib(app_dir, binary_path, dylib_src):
     shutil.copy2(dylib_src, dst)
     print(f"  Copied {dylib_name} to Frameworks/")
 
-    fat = lief.MachO.parse(binary_path)
-    rpath_val = "@executable_path/Frameworks"
-    dylib_val = f"@rpath/{dylib_name}"
+    dylib_val = "@rpath/PvZHDFix.dylib"
+    workdir = os.path.dirname(binary_path)
+    binary_name = os.path.basename(binary_path)
 
-    for slice_ in fat:
-        arch = _get_arch(slice_)
+    # Get list of architectures
+    lipo_info = subprocess.run(["lipo", "-info", binary_path],
+                               capture_output=True, text=True)
+    arches = []
+    for part in lipo_info.stdout.split():
+        if part in ("armv7", "arm64", "arm64e", "armv7s"):
+            arches.append(part)
+    if not arches:
+        arches = ["thin"]
 
-        # Add rpath if not already present
-        existing_rpaths = []
-        for cmd in slice_.commands:
-            if str(cmd.command) == 'COMMAND_TYPES.RPATH':
-                try:
-                    existing_rpaths.append(cmd.path)
-                except Exception:
-                    pass
-        if rpath_val not in existing_rpaths:
-            rp = lief.MachO.RPathCommand.create(rpath_val)
-            slice_.add(rp)
-            print(f"  [{arch}] Added rpath: {rpath_val}")
+    tmpdir = tempfile.mkdtemp(dir=workdir)
+    slice_paths = {}
+
+    # Split fat binary into thin slices
+    for arch in arches:
+        out = os.path.join(tmpdir, f"{binary_name}.{arch}")
+        if arch == "thin":
+            slice_paths[arch] = binary_path
         else:
-            print(f"  [{arch}] rpath already present")
+            subprocess.run(["lipo", binary_path, "-thin", arch, "-output", out], check=True)
+            slice_paths[arch] = out
+            print(f"  Extracted {arch}")
 
-        # Add LC_LOAD_DYLIB if not already present
-        existing_libs = [str(lib.name) for lib in slice_.libraries]
-        if not any(dylib_name in lib for lib in existing_libs):
-            dylib_cmd = lief.MachO.DylibCommand(dylib_val)
-            slice_.add(dylib_cmd)
-            print(f"  [{arch}] Added LC_LOAD_DYLIB: {dylib_val}")
+    # Process each slice
+    for arch, spath in slice_paths.items():
+        if arch == "thin":
+            lbl = "thin"
         else:
-            print(f"  [{arch}] LC_LOAD_DYLIB already present")
+            lbl = arch
+        # Add rpath
+        subprocess.run(["install_name_tool", "-add_rpath",
+                        "@executable_path/Frameworks", spath],
+                       capture_output=True)
+        print(f"  [{lbl}] Added rpath: @executable_path/Frameworks")
+        # Add LC_LOAD_DYLIB
+        insert_bin = shutil.which("insert_dylib") or "/usr/local/bin/insert_dylib"
+        subprocess.run([insert_bin, "--inplace", "--all-yes",
+                        dylib_val, spath],
+                       capture_output=True)
+        print(f"  [{lbl}] Injected LC_LOAD_DYLIB: {dylib_val}")
 
-        if slice_.has_code_signature:
-            slice_.remove_signature()
+    # Recombine
+    if len(slice_paths) > 1 or (len(slice_paths) == 1 and list(slice_paths.keys())[0] != "thin"):
+        lipo_args = ["lipo", "-create"]
+        for _, spath in sorted(slice_paths.items()):
+            lipo_args.append(spath)
+        lipo_args += ["-output", binary_path]
+        subprocess.run(lipo_args, check=True)
+        print(f"  Recombined fat binary")
+    else:
+        # Single slice already modified in-place; copy back if needed
+        if arches[0] != "thin":
+            shutil.copy2(slice_paths[arches[0]], binary_path)
 
-    fat.write(binary_path)
-    print(f"  Binary updated with dylib injection")
+    shutil.rmtree(tmpdir, ignore_errors=True)
 
-    # Also sign the dylib with ldid
+    # Sign the dylib with ldid
     ldid_path = next((p for p in [
         os.path.join(os.path.dirname(os.path.realpath(__file__)), "ldid"),
         shutil.which("ldid"),
