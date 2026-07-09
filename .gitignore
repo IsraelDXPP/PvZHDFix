@@ -1,3 +1,4 @@
 ldid
 *.ipa
+!PvZ_HD.ipa
 PvZHDFix.dylib
