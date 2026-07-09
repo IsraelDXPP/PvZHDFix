@@ -26,6 +26,25 @@ static void hook_setTitle_forState(id self, SEL _cmd, NSString *title, UIControl
 }
 
 // ============================================================
+// UIControl sendAction:to:forEvent: swizzle -> intercept "Unlock All" tap
+// ============================================================
+static void (*orig_sendAction_to_forEvent)(id, SEL, SEL, id, UIEvent *);
+static void hook_sendAction_to_forEvent(id self, SEL _cmd, SEL action, id target, UIEvent *event) {
+    if ([self isKindOfClass:objc_getClass("UIButton")]) {
+        NSString *title = [(UIButton *)self titleForState:UIControlStateNormal];
+        if ([title isEqualToString:@"Unlock All"]) {
+            applyUnlocks();
+            UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"Unlock All"
+                                                             message:@"All game modes and levels have been unlocked!"
+                                                            delegate:nil cancelButtonTitle:@"OK" otherButtonTitles:nil];
+            [alert show];
+            return;
+        }
+    }
+    orig_sendAction_to_forEvent(self, _cmd, action, target, event);
+}
+
+// ============================================================
 // Unlock all content via NSUserDefaults
 // ============================================================
 static void applyUnlocks(void) {
@@ -74,6 +93,15 @@ void PvZHDFix_Initialize(void) {
             orig_setTitle_forState = (void*)method_getImplementation(titleMethod);
             method_setImplementation(titleMethod, (IMP)hook_setTitle_forState);
             NSLog(@"[PvZHDFix] UIButton setTitle:forState: swizzled");
+        }
+
+        Class control = objc_getClass("UIControl");
+        SEL actionSel = @selector(sendAction:to:forEvent:);
+        Method actionMethod = class_getInstanceMethod(control, actionSel);
+        if (actionMethod) {
+            orig_sendAction_to_forEvent = (void*)method_getImplementation(actionMethod);
+            method_setImplementation(actionMethod, (IMP)hook_sendAction_to_forEvent);
+            NSLog(@"[PvZHDFix] UIControl sendAction:to:forEvent: swizzled");
         }
 
         applyUnlocks();
