@@ -5,7 +5,7 @@
 //   2. 7 SCNetworkReachability hooks via fishhook -> bloquea ads/red
 //   3. NSURLConnection sync block
 //   4. applyUnlocks() en constructor -> desbloquea todo al lanzar
-//   5. Raw BL hook at pvz+0x1E4580 -> About button -> applyUnlocks + alert
+//   5. Raw BL hook (pattern-search in __TEXT) -> About button -> applyUnlocks + alert
 
 #include <stdio.h>
 #include <stdbool.h>
@@ -18,6 +18,7 @@
 #include <objc/runtime.h>
 #include <mach/mach.h>
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #include <libkern/OSCacheControl.h>
 #include "fishhook.h"
 
@@ -284,30 +285,75 @@ static void write_trampoline(uint16_t *tramp, uintptr_t hook_fn) {
     tramp[5] = 0xBD01;
 }
 
+// Search for byte pattern in memory (within __TEXT of main binary)
+static uintptr_t find_pattern_in_text(const uint8_t *pattern, size_t len) {
+    uintptr_t header = (uintptr_t)_dyld_get_image_header(0);
+    if (!header) return 0;
+
+    uint32_t *cmds = (uint32_t *)header;
+    uint32_t ncmds = cmds[4];
+
+    uintptr_t text_start = 0, text_size = 0;
+    uintptr_t cmd_ptr = header + sizeof(struct mach_header);
+
+    for (uint32_t i = 0; i < ncmds; i++) {
+        uint32_t cmd = *(uint32_t *)cmd_ptr;
+        uint32_t cmdsize = *(uint32_t *)(cmd_ptr + 4);
+        if (cmd == 1) { // LC_SEGMENT (32-bit)
+            uint8_t *seg = (uint8_t *)cmd_ptr;
+            if (memcmp(seg + 8, "__TEXT\0\0\0\0\0\0\0\0\0\0", 16) == 0) {
+                text_start = *(uint32_t *)(seg + 0x1C) + header; // vmaddr + slide
+                text_size = *(uint32_t *)(seg + 0x20);
+                break;
+            }
+        }
+        cmd_ptr += cmdsize;
+    }
+
+    if (!text_start || !text_size) return 0;
+
+    for (uintptr_t p = text_start; p < text_start + text_size - len; p += 2) {
+        if (memcmp((void *)p, pattern, len) == 0)
+            return p;
+    }
+    return 0;
+}
+
+static void patch_and_flush(uintptr_t addr, const void *data, size_t len) {
+    vm_address_t page = addr & ~0xFFF;
+    vm_protect(mach_task_self(), page, 0x1000, FALSE, VM_PROT_DEFAULT | VM_PROT_COPY);
+    memcpy((void *)addr, data, len);
+    vm_protect(mach_task_self(), page, 0x1000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    sys_dcache_flush((void *)addr, len);
+    sys_icache_invalidate((void *)addr, len);
+}
+
 static void install_about_hook(void) {
-    uintptr_t pvz_base = (uintptr_t)_dyld_get_image_header(0);
-    uintptr_t hook_target = pvz_base + 0x1E4580;
     uintptr_t hook_fn = (uintptr_t)&hook_about_button;
 
-    intptr_t bl_offset = (intptr_t)(hook_fn - (hook_target + 4));
+    // Signature of the About button handler: LDR R1, [SP, #4]; LDRH.W R2, ...
+    // Found at file offset 0x1E4580 in original, shifts after LIEF/insert_dylib
+    const uint8_t pattern[] = {0x01, 0x99, 0x9D, 0xF8, 0x03, 0x20, 0x02, 0xF0, 0x01, 0x02};
+    uintptr_t hook_target = find_pattern_in_text(pattern, sizeof(pattern));
 
-    if (bl_offset >= -16777216 && bl_offset <= 16777215) {
-        uint16_t bl[2];
-        encode_bl(bl, hook_target, hook_fn);
-
-        vm_address_t page = (vm_address_t)hook_target & ~0xFFF;
-        vm_protect(mach_task_self(), page, 0x1000, FALSE, VM_PROT_DEFAULT | VM_PROT_COPY);
-        memcpy((void *)hook_target, bl, 4);
-        vm_protect(mach_task_self(), page, 0x1000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-
-        sys_dcache_flush((void *)hook_target, 4);
-        sys_icache_invalidate((void *)hook_target, 4);
-
-        NSLog(@"[PvZHDFix] About button hook installed (direct BL, distance=%d)", (int)bl_offset);
+    if (!hook_target) {
+        NSLog(@"[PvZHDFix] Could not find About button pattern in __TEXT");
         return;
     }
 
-    // Two-stage trampoline needed
+    NSLog(@"[PvZHDFix] About button at 0x%x", (unsigned int)hook_target);
+
+    // Try direct BL first
+    intptr_t bl_offset = (intptr_t)(hook_fn - (hook_target + 4));
+    if (bl_offset >= -16777216 && bl_offset <= 16777215) {
+        uint16_t bl[2];
+        encode_bl(bl, hook_target, hook_fn);
+        patch_and_flush(hook_target, bl, 4);
+        NSLog(@"[PvZHDFix] About button hooked (direct BL, distance=%d)", (int)bl_offset);
+        return;
+    }
+
+    // Two-stage trampoline
     vm_address_t tramp_addr = 0;
     kern_return_t kr = vm_allocate(mach_task_self(), &tramp_addr, 0x1000, VM_FLAGS_ANYWHERE);
     if (kr != KERN_SUCCESS) {
@@ -315,10 +361,8 @@ static void install_about_hook(void) {
         return;
     }
 
-    // Ensure trampoline is within 16MB of hook_target
     intptr_t tramp_dist = (intptr_t)(tramp_addr - (hook_target + 4));
     if (tramp_dist < -16777216 || tramp_dist > 16777215) {
-        // Try allocating near target
         vm_deallocate(mach_task_self(), tramp_addr, 0x1000);
         vm_address_t hint = (hook_target + 0x4000) & ~0xFFF;
         for (int attempt = 0; attempt < 4; attempt++) {
@@ -340,27 +384,16 @@ static void install_about_hook(void) {
         }
     }
 
-    // Make trampoline page writable and executable
     vm_protect(mach_task_self(), tramp_addr, 0x1000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE | VM_PROT_WRITE);
-
     write_trampoline((uint16_t *)tramp_addr, hook_fn);
-
     sys_dcache_flush((void *)tramp_addr, 12);
     sys_icache_invalidate((void *)tramp_addr, 12);
 
-    // Write BL at hook target to trampoline
     uint16_t bl[2];
     encode_bl(bl, hook_target, tramp_addr);
+    patch_and_flush(hook_target, bl, 4);
 
-    vm_address_t page = (vm_address_t)hook_target & ~0xFFF;
-    vm_protect(mach_task_self(), page, 0x1000, FALSE, VM_PROT_DEFAULT | VM_PROT_COPY);
-    memcpy((void *)hook_target, bl, 4);
-    vm_protect(mach_task_self(), page, 0x1000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-
-    sys_dcache_flush((void *)hook_target, 4);
-    sys_icache_invalidate((void *)hook_target, 4);
-
-    NSLog(@"[PvZHDFix] About button hook installed (via trampoline at 0x%x)", (unsigned int)tramp_addr);
+    NSLog(@"[PvZHDFix] About button hooked (via trampoline at 0x%x)", (unsigned int)tramp_addr);
 }
 
 // ============================================================
