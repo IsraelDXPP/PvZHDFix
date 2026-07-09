@@ -1,11 +1,17 @@
 name: Build PvZHDFix Modded IPA
 
 on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'hooks/**'
+      - 'patch_ipa.py'
+      - '.github/workflows/build_ipa.yml'
   workflow_dispatch:
     inputs:
       ipa_url:
-        description: 'URL directa de descarga del IPA original (PvZ HD Free 2.4.0)'
-        required: true
+        description: 'URL directa del IPA original (sobreescribe el Secret IPA_URL)'
+        required: false
         type: string
 
 jobs:
@@ -27,24 +33,40 @@ jobs:
       - name: Instalar ldid
         run: brew install ldid
 
-      - name: Compilar insert_dylib
+      - name: Compilar insert_dylib desde fuente
         run: |
           git clone --depth 1 https://github.com/Tyilo/insert_dylib /tmp/insert_dylib
           cd /tmp/insert_dylib
           xcodebuild -quiet -configuration Release 2>&1 | tail -5
           sudo cp build/Release/insert_dylib /usr/local/bin/insert_dylib
 
+      - name: Resolver URL del IPA
+        id: ipa
+        run: |
+          # workflow_dispatch input tiene prioridad; si no, usa el Secret IPA_URL
+          URL="${{ github.event.inputs.ipa_url }}"
+          if [ -z "$URL" ]; then
+            URL="${{ secrets.IPA_URL }}"
+          fi
+          if [ -z "$URL" ]; then
+            echo "ERROR: No hay URL del IPA."
+            echo "Configura el Secret IPA_URL en Settings -> Secrets -> Actions"
+            exit 1
+          fi
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "IPA URL configurada OK"
+
       - name: Descargar IPA original
         run: |
-          curl -L "${{ github.event.inputs.ipa_url }}" -o input.ipa
+          curl -L "${{ steps.ipa.outputs.url }}" -o input.ipa
           echo "Tamaño: $(du -sh input.ipa | cut -f1)"
 
-      - name: Mostrar iOS SDK
+      - name: Obtener iOS SDK
         id: sdk
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "path=$SDK" >> $GITHUB_OUTPUT
-          echo "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version) en $SDK"
+          echo "iOS SDK: $(xcrun --sdk iphoneos --show-sdk-version)"
 
       - name: Compilar PvZHDFix.dylib (arm64 + armv7)
         run: |
@@ -59,32 +81,64 @@ jobs:
             hooks/fishhook.c \
             -framework SystemConfiguration \
             -framework Foundation \
+            -framework UIKit \
             -fobjc-arc \
             -O2 \
             -miphoneos-version-min=8.0 \
             -install_name "@rpath/PvZHDFix.dylib" \
             -Wno-deprecated-declarations
+          echo "=== Dylib compilado ==="
           file PvZHDFix.dylib
           lipo -info PvZHDFix.dylib
+          ls -lh PvZHDFix.dylib
 
-      - name: Parchear e inyectar dylib en IPA
-        run: |
-          python3 patch_ipa.py input.ipa PvZHD_UnlockAll.ipa
+      - name: Parchear + inyectar dylib en IPA
+        run: python3 patch_ipa.py input.ipa PvZHD_UnlockAll.ipa
 
-      - name: Verificar IPA
+      - name: Verificar IPA final
         run: |
-          python3 -c "
+          python3 - <<'EOF'
           import zipfile
           with zipfile.ZipFile('PvZHD_UnlockAll.ipa') as z:
+              print("=== Archivos clave ===")
               for n in z.namelist():
                   b = n.split('/')[-1]
-                  if b == 'pvz' or 'PvZHDFix' in n or 'CodeSignature' in n:
-                      print(f'  {n}')
-          print('OK')
-          "
+                  if b in ('pvz',) or 'PvZHDFix' in n or '_CodeSignature' in n:
+                      print(f"  {n}")
+          print("OK - IPA listo")
+          EOF
+          ls -lh PvZHD_UnlockAll.ipa
 
-      - name: Subir IPA como artefacto
+      - name: Subir IPA como release asset
+        uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push'
+        with:
+          tag_name: "build-${{ github.run_number }}"
+          name: "PvZHD UnlockAll Mod - Build ${{ github.run_number }}"
+          body: |
+            **Mod automático compilado en commit `${{ github.sha }}`**
+
+            ### Cambios
+            ${{ github.event.head_commit.message }}
+
+            ### Contenido del mod
+            - ✅ Botón "Acerca de" → "Unlock All"
+            - ✅ Al presionar el botón → desbloquea todo el contenido + alerta
+            - ✅ Desbloqueo automático al lanzar el juego
+            - ✅ Fixes de red para no crashear en iOS 8
+            - ✅ SafariServices → weak link (compatible iPad Mini 1)
+
+            ### Instalar
+            ```bash
+            ideviceinstaller -i PvZHD_UnlockAll.ipa
+            ```
+          files: PvZHD_UnlockAll.ipa
+          draft: false
+          prerelease: false
+
+      - name: Subir IPA como artefacto (workflow_dispatch)
         uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
         with:
           name: PvZHD_UnlockAll_Mod
           path: PvZHD_UnlockAll.ipa
