@@ -18,6 +18,7 @@
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
 #include <objc/runtime.h>
+#include <libkern/OSCacheControl.h>
 #include "fishhook.h"
 
 
@@ -167,7 +168,7 @@ static NSData *hook_dataWithContentsOfFile(Class self, SEL _cmd, NSString *path)
             NSString *patched = patchLawnStrings(content);
             if (patched != content) {
                 NSData *newData = [patched dataUsingEncoding:NSUTF16LittleEndianStringEncoding];
-                if (newData) return [newData retain];
+                if (newData) return newData;
             }
         }
     }
@@ -185,7 +186,7 @@ static NSData *hook_dataWithContentsOfFile_options_error(Class self, SEL _cmd, N
             NSString *patched = patchLawnStrings(content);
             if (patched != content) {
                 NSData *newData = [patched dataUsingEncoding:NSUTF16LittleEndianStringEncoding];
-                if (newData) return [newData retain];
+                if (newData) return newData;
             }
         }
     }
@@ -198,7 +199,7 @@ static NSString *hook_stringWithContentsOfFile_encoding_error(Class self, SEL _c
     NSString *result = orig_stringWithContentsOfFile_encoding_error(self, _cmd, path, enc, error);
     if (result && [path hasSuffix:@"LawnStrings.txt"]) {
         NSString *patched = patchLawnStrings(result);
-        if (patched != result) return [patched retain];
+        if (patched != result) return patched;
     }
     return result;
 }
