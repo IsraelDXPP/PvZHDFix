@@ -16,7 +16,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-13
+    runs-on: macos-14
 
     steps:
       - name: Checkout repo
@@ -122,10 +122,10 @@ jobs:
             ${{ github.event.head_commit.message }}
 
             ### Contenido del mod
-            - ✅ Botón "Acerca de" → "Unlock All"
-            - ✅ Al presionar el botón → desbloquea todo el contenido + alerta
-            - ✅ Desbloqueo automático al lanzar el juego
-            - ✅ Fixes de red para no crashear en iOS 8
+            - ✅ Texto "Acerca de" → "Unlock All" (hook en NSData/NSString)
+            - ✅ Desbloqueo automático de todo el contenido al lanzar el juego
+            - ✅ Fixes de red (SCNetworkReachability) para no crashear en iOS 8
+            - ✅ NSURLConnection sync request bloqueado
             - ✅ SafariServices → weak link (compatible iPad Mini 1)
 
             ### Instalar
