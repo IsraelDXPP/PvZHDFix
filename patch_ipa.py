@@ -234,7 +234,7 @@ def inject_dylib(app_dir, binary_path, dylib_src):
         # Add LC_LOAD_DYLIB if not already present
         existing_libs = [str(lib.name) for lib in slice_.libraries]
         if not any(dylib_name in lib for lib in existing_libs):
-            dylib_cmd = lief.MachO.DylibCommand.create(dylib_val)
+            dylib_cmd = lief.MachO.DylibCommand(dylib_val)
             slice_.add(dylib_cmd)
             print(f"  [{arch}] Added LC_LOAD_DYLIB: {dylib_val}")
         else:
