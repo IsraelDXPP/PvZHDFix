@@ -285,114 +285,101 @@ static void write_trampoline(uint16_t *tramp, uintptr_t hook_fn) {
     tramp[5] = 0xBD01;
 }
 
-// Search for byte pattern in memory (within __TEXT of main binary)
 static uintptr_t find_pattern_in_text(const uint8_t *pattern, size_t len) {
     uintptr_t header = (uintptr_t)_dyld_get_image_header(0);
     if (!header) return 0;
-
-    uint32_t *cmds = (uint32_t *)header;
-    uint32_t ncmds = cmds[4];
     uintptr_t cmd_ptr = header + sizeof(struct mach_header);
+    uint32_t ncmds = *(uint32_t *)(header + 16);
     uintptr_t text_start = 0, text_size = 0;
 
     for (uint32_t i = 0; i < ncmds; i++) {
         uint32_t cmd = *(uint32_t *)cmd_ptr;
         uint32_t cmdsize = *(uint32_t *)(cmd_ptr + 4);
         if (cmd == LC_SEGMENT) {
-            uint8_t *seg = (uint8_t *)cmd_ptr;
-            if (memcmp(seg + 8, "__TEXT\0\0\0\0\0\0\0\0\0\0", 16) == 0) {
+            if (memcmp((void *)(cmd_ptr + 8), "__TEXT\0\0\0\0\0\0\0\0\0\0", 16) == 0) {
                 text_start = header;
-                text_size = *(uint32_t *)(seg + 0x1C);
+                text_size = *(uint32_t *)(cmd_ptr + 0x1C);
                 break;
             }
         }
         cmd_ptr += cmdsize;
     }
-
     if (!text_start || !text_size) return 0;
 
-    for (uintptr_t p = text_start; p < text_start + text_size - len; p += 2) {
-        if (memcmp((void *)p, pattern, len) == 0)
-            return p;
-    }
+    for (uintptr_t p = text_start; p + len <= text_start + text_size; p += 2)
+        if (memcmp((void *)p, pattern, len) == 0) return p;
     return 0;
 }
 
-static void patch_and_flush(uintptr_t addr, const void *data, size_t len) {
+static int make_writable(vm_address_t addr) {
     vm_address_t page = addr & ~0xFFF;
-    vm_protect(mach_task_self(), page, 0x1000, FALSE, VM_PROT_DEFAULT | VM_PROT_COPY);
+    kern_return_t kr = vm_protect(mach_task_self(), page, 0x1000, FALSE,
+                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+    if (kr == KERN_SUCCESS) return 1;
+    kr = vm_protect(mach_task_self(), page, 0x1000, FALSE,
+                    VM_PROT_READ | VM_PROT_WRITE);
+    return kr == KERN_SUCCESS;
+}
+
+static int make_executable(vm_address_t addr) {
+    vm_address_t page = addr & ~0xFFF;
+    return vm_protect(mach_task_self(), page, 0x1000, FALSE,
+                      VM_PROT_READ | VM_PROT_EXECUTE) == KERN_SUCCESS;
+}
+
+static int write_and_flush(uintptr_t addr, const void *data, size_t len) {
+    if (!make_writable(addr)) return 0;
     memcpy((void *)addr, data, len);
-    vm_protect(mach_task_self(), page, 0x1000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    if (memcmp((void *)addr, data, len) != 0) return 0;
+    if (!make_executable(addr)) return 0;
     sys_dcache_flush((void *)addr, len);
     sys_icache_invalidate((void *)addr, len);
+    return 1;
 }
 
 static void install_about_hook(void) {
+    uintptr_t header = (uintptr_t)_dyld_get_image_header(0);
+    if (!header) { NSLog(@"[PvZHDFix] _dyld_get_image_header(0) is NULL"); return; }
+    NSLog(@"[PvZHDFix] pvz_base = 0x%x", (unsigned int)header);
+
     uintptr_t hook_fn = (uintptr_t)&hook_about_button;
+    uintptr_t hook_target = header + 0x1E4580;
 
-    // Signature of the About button handler: LDR R1, [SP, #4]; LDRH.W R2, ...
-    // Found at file offset 0x1E4580 in original, shifts after LIEF/insert_dylib
-    const uint8_t pattern[] = {0x01, 0x99, 0x9D, 0xF8, 0x03, 0x20, 0x02, 0xF0, 0x01, 0x02};
-    uintptr_t hook_target = find_pattern_in_text(pattern, sizeof(pattern));
+    // Verify pattern
+    uint8_t expected[] = {0x01, 0x99, 0x9D, 0xF8, 0x03, 0x20, 0x02, 0xF0};
+    uint8_t actual[sizeof(expected)];
+    memcpy(actual, (void *)hook_target, sizeof(actual));
+    NSLog(@"[PvZHDFix] target=0x%x bytes: %02x %02x %02x %02x %02x %02x %02x %02x",
+          (unsigned int)hook_target,
+          actual[0], actual[1], actual[2], actual[3],
+          actual[4], actual[5], actual[6], actual[7]);
 
-    if (!hook_target) {
-        NSLog(@"[PvZHDFix] Could not find About button pattern in __TEXT");
-        return;
-    }
-
-    NSLog(@"[PvZHDFix] About button at 0x%x", (unsigned int)hook_target);
-
-    // Try direct BL first
-    intptr_t bl_offset = (intptr_t)(hook_fn - (hook_target + 4));
-    if (bl_offset >= -16777216 && bl_offset <= 16777215) {
-        uint16_t bl[2];
-        encode_bl(bl, hook_target, hook_fn);
-        patch_and_flush(hook_target, bl, 4);
-        NSLog(@"[PvZHDFix] About button hooked (direct BL, distance=%d)", (int)bl_offset);
-        return;
-    }
-
-    // Two-stage trampoline
-    vm_address_t tramp_addr = 0;
-    kern_return_t kr = vm_allocate(mach_task_self(), &tramp_addr, 0x1000, VM_FLAGS_ANYWHERE);
-    if (kr != KERN_SUCCESS) {
-        NSLog(@"[PvZHDFix] Failed to allocate trampoline page: %d", kr);
-        return;
-    }
-
-    intptr_t tramp_dist = (intptr_t)(tramp_addr - (hook_target + 4));
-    if (tramp_dist < -16777216 || tramp_dist > 16777215) {
-        vm_deallocate(mach_task_self(), tramp_addr, 0x1000);
-        vm_address_t hint = (hook_target + 0x4000) & ~0xFFF;
-        for (int attempt = 0; attempt < 4; attempt++) {
-            hint += 0x10000 * (attempt % 2 == 0 ? 1 : -1);
-            if (hint < 0x10000) hint = 0x10000;
-            kr = vm_allocate(mach_task_self(), &hint, 0x1000, VM_FLAGS_FIXED);
-            if (kr == KERN_SUCCESS) {
-                intptr_t d = (intptr_t)(hint - (hook_target + 4));
-                if (d >= -16777216 && d <= 16777215) {
-                    tramp_addr = hint;
-                    break;
-                }
-                vm_deallocate(mach_task_self(), hint, 0x1000);
-            }
-        }
-        if (kr != KERN_SUCCESS) {
-            NSLog(@"[PvZHDFix] Could not allocate trampoline near target");
+    if (memcmp(actual, expected, sizeof(expected)) != 0) {
+        NSLog(@"[PvZHDFix] Pattern mismatch, searching __TEXT...");
+        hook_target = find_pattern_in_text(expected, sizeof(expected));
+        if (!hook_target) {
+            NSLog(@"[PvZHDFix] Pattern not found, giving up");
             return;
         }
+        NSLog(@"[PvZHDFix] Found pattern at 0x%x", (unsigned int)hook_target);
     }
 
-    vm_protect(mach_task_self(), tramp_addr, 0x1000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE | VM_PROT_WRITE);
-    write_trampoline((uint16_t *)tramp_addr, hook_fn);
-    sys_dcache_flush((void *)tramp_addr, 12);
-    sys_icache_invalidate((void *)tramp_addr, 12);
+    intptr_t bl_offset = (intptr_t)(hook_fn - (hook_target + 4));
+    if (bl_offset < -16777216 || bl_offset > 16777215) {
+        NSLog(@"[PvZHDFix] BL out of range (%d), trampoline needed", (int)bl_offset);
+        return;
+    }
 
     uint16_t bl[2];
-    encode_bl(bl, hook_target, tramp_addr);
-    patch_and_flush(hook_target, bl, 4);
+    encode_bl(bl, hook_target, hook_fn);
+    NSLog(@"[PvZHDFix] BL=%04x %04x dist=%d fn=0x%x", bl[0], bl[1],
+          (int)bl_offset, (unsigned int)hook_fn);
 
-    NSLog(@"[PvZHDFix] About button hooked (via trampoline at 0x%x)", (unsigned int)tramp_addr);
+    if (!write_and_flush(hook_target, bl, 4)) {
+        NSLog(@"[PvZHDFix] write_and_flush FAILED");
+        return;
+    }
+    NSLog(@"[PvZHDFix] About button hooked OK");
 }
 
 // ============================================================
