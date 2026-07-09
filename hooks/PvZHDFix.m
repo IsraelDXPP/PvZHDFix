@@ -15,6 +15,11 @@
 #include <objc/runtime.h>
 
 // ============================================================
+// Forward declarations
+// ============================================================
+static void applyUnlocks(void);
+
+// ============================================================
 // UIButton setTitle:forState: swizzle
 // ============================================================
 static void (*orig_setTitle_forState)(id, SEL, NSString *, UIControlState);
