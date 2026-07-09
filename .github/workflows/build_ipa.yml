@@ -40,25 +40,24 @@ jobs:
           xcodebuild -quiet -configuration Release 2>&1 | tail -5
           sudo cp build/Release/insert_dylib /usr/local/bin/insert_dylib
 
-      - name: Resolver URL del IPA
+      - name: Buscar IPA local o descargar
         id: ipa
         run: |
-          # workflow_dispatch input tiene prioridad; si no, usa el Secret IPA_URL
-          URL="${{ github.event.inputs.ipa_url }}"
-          if [ -z "$URL" ]; then
-            URL="${{ secrets.IPA_URL }}"
-          fi
-          if [ -z "$URL" ]; then
-            echo "ERROR: No hay URL del IPA."
-            echo "Configura el Secret IPA_URL en Settings -> Secrets -> Actions"
+          # Prioridad: IPA en el repo > workflow_dispatch > Secret IPA_URL
+          if [ -f "PvZ_HD.ipa" ]; then
+            echo "Usando IPA local del repo"
+            cp PvZ_HD.ipa input.ipa
+          elif [ -n "${{ github.event.inputs.ipa_url }}" ]; then
+            echo "Descargando desde workflow_dispatch URL"
+            curl -L "${{ github.event.inputs.ipa_url }}" -o input.ipa
+          elif [ -n "${{ secrets.IPA_URL }}" ]; then
+            echo "Descargando desde Secret IPA_URL"
+            curl -L "${{ secrets.IPA_URL }}" -o input.ipa
+          else
+            echo "ERROR: No se encontró IPA."
+            echo "Sube PvZ_HD.ipa al repo o configura IPA_URL en Settings -> Secrets -> Actions"
             exit 1
           fi
-          echo "url=$URL" >> $GITHUB_OUTPUT
-          echo "IPA URL configurada OK"
-
-      - name: Descargar IPA original
-        run: |
-          curl -L "${{ steps.ipa.outputs.url }}" -o input.ipa
           echo "Tamaño: $(du -sh input.ipa | cut -f1)"
 
       - name: Obtener iOS SDK
