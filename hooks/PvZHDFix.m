@@ -1,7 +1,7 @@
 // PvZHDFix.m - Standalone hook dylib para sideloading (sin jailbreak)
 // Compilar con GitHub Actions: .github/workflows/build_ipa.yml
 // Hooks:
-//   1. NSData/NSString swizzle -> LawnStrings.txt: "Acerca de" -> "Unlock All"
+//   1. UIButton setTitle:forState: swizzle -> "Acerca de" -> "Unlock All"
 //   2. NSURLConnection sync block
 //   3. applyUnlocks() en constructor -> desbloquea todo al lanzar
 //   4. About button hook (armv7) -> applyUnlocks + alert
@@ -33,66 +33,14 @@ static NSData *hooked_NSURLConnection_sendSyncRequest(Class self, SEL _cmd, NSUR
 }
 
 // ============================================================
-// LawnStrings.txt text patch
+// UIButton setTitle:forState: swizzle
 // ============================================================
-static NSString *patchLawnStrings(NSString *content) {
-    NSRange keyRange = [content rangeOfString:@"[BTN_LEGAL_ABOUT]"];
-    if (keyRange.location == NSNotFound) return content;
-
-    NSUInteger i = keyRange.location + keyRange.length;
-    NSCharacterSet *nl = [NSCharacterSet newlineCharacterSet];
-    while (i < content.length && [nl characterIsMember:[content characterAtIndex:i]]) i++;
-    NSUInteger lineEnd = i;
-    while (lineEnd < content.length && ![nl characterIsMember:[content characterAtIndex:lineEnd]]) lineEnd++;
-
-    return [content stringByReplacingCharactersInRange:NSMakeRange(i, lineEnd - i)
-                                            withString:@"Unlock All"];
-}
-
-static NSData *(*orig_dataWithContentsOfFile)(Class, SEL, NSString *);
-static NSData *hook_dataWithContentsOfFile(Class self, SEL _cmd, NSString *path) {
-    NSData *data = orig_dataWithContentsOfFile(self, _cmd, path);
-    if (data && [path hasSuffix:@"LawnStrings.txt"]) {
-        NSString *content = [[NSString alloc] initWithData:data encoding:NSUTF16LittleEndianStringEncoding];
-        if (!content) content = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (content) {
-            NSString *patched = patchLawnStrings(content);
-            if (patched != content) {
-                NSData *newData = [patched dataUsingEncoding:NSUTF16LittleEndianStringEncoding];
-                if (newData) return newData;
-            }
-        }
+static void (*orig_setTitle_forState)(id, SEL, NSString *, UIControlState);
+static void hook_setTitle_forState(id self, SEL _cmd, NSString *title, UIControlState state) {
+    if ([title isEqualToString:@"Acerca DE"] || [title isEqualToString:@"Acerca de"]) {
+        title = @"Unlock All";
     }
-    return data;
-}
-
-static NSData *(*orig_dataWithContentsOfFile_options_error)(Class, SEL, NSString *, NSDataReadingOptions, NSError **);
-static NSData *hook_dataWithContentsOfFile_options_error(Class self, SEL _cmd, NSString *path,
-                                                          NSDataReadingOptions opts, NSError **error) {
-    NSData *data = orig_dataWithContentsOfFile_options_error(self, _cmd, path, opts, error);
-    if (data && [path hasSuffix:@"LawnStrings.txt"]) {
-        NSString *content = [[NSString alloc] initWithData:data encoding:NSUTF16LittleEndianStringEncoding];
-        if (!content) content = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (content) {
-            NSString *patched = patchLawnStrings(content);
-            if (patched != content) {
-                NSData *newData = [patched dataUsingEncoding:NSUTF16LittleEndianStringEncoding];
-                if (newData) return newData;
-            }
-        }
-    }
-    return data;
-}
-
-static NSString *(*orig_stringWithContentsOfFile_encoding_error)(Class, SEL, NSString *, NSStringEncoding, NSError **);
-static NSString *hook_stringWithContentsOfFile_encoding_error(Class self, SEL _cmd, NSString *path,
-                                                               NSStringEncoding enc, NSError **error) {
-    NSString *result = orig_stringWithContentsOfFile_encoding_error(self, _cmd, path, enc, error);
-    if (result && [path hasSuffix:@"LawnStrings.txt"]) {
-        NSString *patched = patchLawnStrings(result);
-        if (patched != result) return patched;
-    }
-    return result;
+    orig_setTitle_forState(self, _cmd, title, state);
 }
 
 // ============================================================
@@ -250,7 +198,7 @@ static void install_about_hook(void) {
     }
 
     // ========= ARMV7 =========
-    uintptr_t hook_target = header + 0x1E4580;
+    uintptr_t hook_target = header + 0x1E8580;
 
     uint8_t expected[] = {0x01, 0x99, 0x9D, 0xF8, 0x03, 0x20, 0x02, 0xF0};
     uint8_t actual[sizeof(expected)];
@@ -314,24 +262,21 @@ void PvZHDFix_Initialize(void) {
             method_setImplementation(urlMethod, (IMP)hooked_NSURLConnection_sendSyncRequest);
         }
 
-        Class nsdata = objc_getClass("NSData");
-        SEL sel1 = @selector(dataWithContentsOfFile:);
-        Method m1 = class_getClassMethod(nsdata, sel1);
-        if (m1) { orig_dataWithContentsOfFile = (void*)method_getImplementation(m1); method_setImplementation(m1, (IMP)hook_dataWithContentsOfFile); }
-        SEL sel2 = @selector(dataWithContentsOfFile:options:error:);
-        Method m2 = class_getClassMethod(nsdata, sel2);
-        if (m2) { orig_dataWithContentsOfFile_options_error = (void*)method_getImplementation(m2); method_setImplementation(m2, (IMP)hook_dataWithContentsOfFile_options_error); }
-        Class nsstring = objc_getClass("NSString");
-        SEL sel3 = @selector(stringWithContentsOfFile:encoding:error:);
-        Method m3 = class_getClassMethod(nsstring, sel3);
-        if (m3) { orig_stringWithContentsOfFile_encoding_error = (void*)method_getImplementation(m3); method_setImplementation(m3, (IMP)hook_stringWithContentsOfFile_encoding_error); }
+        Class button = objc_getClass("UIButton");
+        SEL titleSel = @selector(setTitle:forState:);
+        Method titleMethod = class_getInstanceMethod(button, titleSel);
+        if (titleMethod) {
+            orig_setTitle_forState = (void*)method_getImplementation(titleMethod);
+            method_setImplementation(titleMethod, (IMP)hook_setTitle_forState);
+            NSLog(@"[PvZHDFix] UIButton setTitle:forState: swizzled");
+        }
 
         install_about_hook();
         applyUnlocks();
 
         NSLog(@"[PvZHDFix] ======================================");
         NSLog(@"[PvZHDFix] PvZHDFix Unlock All Mod cargado OK!");
-        NSLog(@"[PvZHDFix] - Texto boton: 'Unlock All' (via NSData swizzle)");
+        NSLog(@"[PvZHDFix] - Texto boton: 'Unlock All' (via UIButton swizzle)");
         NSLog(@"[PvZHDFix] - Todo el contenido desbloqueado");
         NSLog(@"[PvZHDFix] - SCNetworkReachability trust patch_ipa.py");
         NSLog(@"[PvZHDFix] ======================================");
