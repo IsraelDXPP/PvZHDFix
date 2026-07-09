@@ -55,7 +55,7 @@ blocking network requests.
 | `patch_ipa.py` | **Main tool** — binary patching via LIEF (works on Linux) |
 | `hooks.c` | C implementation using dyld interposing |
 | `hooks.h` | Header for hook functions |
-| `PvZHDFix.c` | Full hook dylib using fishhook |
+| `PvZHDFix.m` | Full hook dylib using fishhook |
 | `Tweak.xm` | Jailbreak tweak (theos/Logos) |
 | `fishhook.h` / `fishhook.c` | Facebook's fishhook library |
 | `Makefile` | theos build file for jailbreak tweak |

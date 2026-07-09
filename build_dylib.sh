@@ -30,7 +30,7 @@ xcrun clang \
     -isysroot "$SDK_PATH" \
     -dynamiclib \
     -o PvZHDFix.dylib \
-    PvZHDFix.c fishhook.c \
+    PvZHDFix.m fishhook.c \
     -framework SystemConfiguration \
     -framework Foundation \
     -fobjc-arc \

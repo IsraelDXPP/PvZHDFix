@@ -86,7 +86,7 @@ jobs:
             -isysroot "$SDK" \
             -dynamiclib \
             -o PvZHDFix.dylib \
-            hooks/PvZHDFix.c \
+            hooks/PvZHDFix.m \
             hooks/fishhook.c \
             -framework SystemConfiguration \
             -framework Foundation \
