@@ -2,17 +2,16 @@
 // Compilar con GitHub Actions: .github/workflows/build_ipa.yml
 // Hooks:
 //   1. NSData/NSString swizzle -> LawnStrings.txt: "Acerca de" -> "Unlock All"
-//   2. 7 SCNetworkReachability hooks via fishhook -> bloquea ads/red
-//   3. NSURLConnection sync block
-//   4. applyUnlocks() en constructor -> desbloquea todo al lanzar
-//   5. About button hook (armv7) -> applyUnlocks + alert
+//   2. NSURLConnection sync block
+//   3. applyUnlocks() en constructor -> desbloquea todo al lanzar
+//   4. About button hook (armv7) -> applyUnlocks + alert
+// NOTA: SCNetworkReachability es parcheado por patch_ipa.py en el binario, no aquí
 
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 #include <dispatch/dispatch.h>
-#include <SystemConfiguration/SCNetworkReachability.h>
 #include <Foundation/Foundation.h>
 #include <UIKit/UIKit.h>
 #include <objc/runtime.h>
@@ -20,50 +19,12 @@
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <libkern/OSCacheControl.h>
-#include "fishhook.h"
 
 
 // ============================================================
 // Original function pointers
 // ============================================================
-static Boolean (*orig_SCNetworkReachabilityGetFlags)(
-    SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) = NULL;
-static SCNetworkReachabilityRef (*orig_SCNetworkReachabilityCreateWithName)(
-    CFAllocatorRef allocator, const char *nodename) = NULL;
-static SCNetworkReachabilityRef (*orig_SCNetworkReachabilityCreateWithAddress)(
-    CFAllocatorRef allocator, const struct sockaddr *address) = NULL;
-static Boolean (*orig_SCNetworkReachabilitySetCallback)(
-    SCNetworkReachabilityRef target, SCNetworkReachabilityCallBack callout,
-    SCNetworkReachabilityContext *context) = NULL;
-static Boolean (*orig_SCNetworkReachabilityScheduleWithRunLoop)(
-    SCNetworkReachabilityRef target, CFRunLoopRef runLoop, CFStringRef runLoopMode) = NULL;
-static Boolean (*orig_SCNetworkReachabilityUnscheduleFromRunLoop)(
-    SCNetworkReachabilityRef target, CFRunLoopRef runLoop, CFStringRef runLoopMode) = NULL;
-static Boolean (*orig_SCNetworkReachabilitySetDispatchQueue)(
-    SCNetworkReachabilityRef target, dispatch_queue_t queue) = NULL;
 static NSData *(*orig_NSURLConnection_sendSyncRequest)(Class, SEL, NSURLRequest *, NSURLResponse **, NSError **) = NULL;
-
-// ============================================================
-// Hooked SCNetworkReachability functions
-// ============================================================
-Boolean hooked_SCNetworkReachabilityGetFlags(
-    SCNetworkReachabilityRef target, SCNetworkReachabilityFlags *flags) {
-    if (flags) *flags = 0;
-    return TRUE;
-}
-SCNetworkReachabilityRef hooked_SCNetworkReachabilityCreateWithName(
-    CFAllocatorRef allocator, const char *nodename) { return NULL; }
-SCNetworkReachabilityRef hooked_SCNetworkReachabilityCreateWithAddress(
-    CFAllocatorRef allocator, const struct sockaddr *address) { return NULL; }
-Boolean hooked_SCNetworkReachabilitySetCallback(
-    SCNetworkReachabilityRef target, SCNetworkReachabilityCallBack callout,
-    SCNetworkReachabilityContext *context) { return TRUE; }
-Boolean hooked_SCNetworkReachabilityScheduleWithRunLoop(
-    SCNetworkReachabilityRef target, CFRunLoopRef runLoop, CFStringRef runLoopMode) { return TRUE; }
-Boolean hooked_SCNetworkReachabilityUnscheduleFromRunLoop(
-    SCNetworkReachabilityRef target, CFRunLoopRef runLoop, CFStringRef runLoopMode) { return TRUE; }
-Boolean hooked_SCNetworkReachabilitySetDispatchQueue(
-    SCNetworkReachabilityRef target, dispatch_queue_t queue) { return TRUE; }
 
 static NSData *hooked_NSURLConnection_sendSyncRequest(Class self, SEL _cmd, NSURLRequest *request,
                                                        NSURLResponse **response, NSError **error) {
@@ -347,18 +308,6 @@ void PvZHDFix_Initialize(void) {
     @autoreleasepool {
         NSLog(@"[PvZHDFix] Loading hook dylib...");
 
-        struct rebinding rebindings[] = {
-            { "SCNetworkReachabilityGetFlags", hooked_SCNetworkReachabilityGetFlags, (void **)&orig_SCNetworkReachabilityGetFlags },
-            { "SCNetworkReachabilityCreateWithName", hooked_SCNetworkReachabilityCreateWithName, (void **)&orig_SCNetworkReachabilityCreateWithName },
-            { "SCNetworkReachabilityCreateWithAddress", hooked_SCNetworkReachabilityCreateWithAddress, (void **)&orig_SCNetworkReachabilityCreateWithAddress },
-            { "SCNetworkReachabilitySetCallback", hooked_SCNetworkReachabilitySetCallback, (void **)&orig_SCNetworkReachabilitySetCallback },
-            { "SCNetworkReachabilityScheduleWithRunLoop", hooked_SCNetworkReachabilityScheduleWithRunLoop, (void **)&orig_SCNetworkReachabilityScheduleWithRunLoop },
-            { "SCNetworkReachabilityUnscheduleFromRunLoop", hooked_SCNetworkReachabilityUnscheduleFromRunLoop, (void **)&orig_SCNetworkReachabilityUnscheduleFromRunLoop },
-            { "SCNetworkReachabilitySetDispatchQueue", hooked_SCNetworkReachabilitySetDispatchQueue, (void **)&orig_SCNetworkReachabilitySetDispatchQueue },
-        };
-
-        int result = rebind_symbols(rebindings, sizeof(rebindings) / sizeof(rebindings[0]));
-
         Method urlMethod = class_getClassMethod([NSURLConnection class], @selector(sendSynchronousRequest:returningResponse:error:));
         if (urlMethod) {
             orig_NSURLConnection_sendSyncRequest = (void *)method_getImplementation(urlMethod);
@@ -380,12 +329,11 @@ void PvZHDFix_Initialize(void) {
         install_about_hook();
         applyUnlocks();
 
-        if (result == 0) {
-            NSLog(@"[PvZHDFix] ======================================");
-            NSLog(@"[PvZHDFix] PvZHDFix Unlock All Mod cargado OK!");
-            NSLog(@"[PvZHDFix] - Texto boton: 'Unlock All' (via NSData swizzle)");
-            NSLog(@"[PvZHDFix] - Todo el contenido desbloqueado");
-            NSLog(@"[PvZHDFix] ======================================");
-        }
+        NSLog(@"[PvZHDFix] ======================================");
+        NSLog(@"[PvZHDFix] PvZHDFix Unlock All Mod cargado OK!");
+        NSLog(@"[PvZHDFix] - Texto boton: 'Unlock All' (via NSData swizzle)");
+        NSLog(@"[PvZHDFix] - Todo el contenido desbloqueado");
+        NSLog(@"[PvZHDFix] - SCNetworkReachability trust patch_ipa.py");
+        NSLog(@"[PvZHDFix] ======================================");
     }
 }

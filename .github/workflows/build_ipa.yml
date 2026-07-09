@@ -93,7 +93,6 @@ jobs:
             -o PvZHDFix.dylib \
             hooks/PvZHDFix.m \
             hooks/fishhook.c \
-            -framework SystemConfiguration \
             -framework Foundation \
             -framework UIKit \
             -fobjc-arc \
